@@ -1,0 +1,325 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Ultra HD Unlock Tool</title>
+    
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.16.105/pdf.min.js"></script>
+    <script src="https://unpkg.com/pdf-lib@1.17.1/dist/pdf-lib.min.js"></script>
+    <script src="https://unpkg.com/downloadjs@1.4.7/download.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/print-js/1.6.0/print.min.js"></script>
+
+    <style>
+        body { font-family: 'Segoe UI', sans-serif; padding: 10px; background: #e9ecef; }
+        .card { background: white; padding: 15px; border-radius: 10px; box-shadow: 0 4px 8px rgba(0,0,0,0.1); margin-bottom: 15px; }
+        h3 { text-align: center; color: #333; margin: 5px 0 15px 0; }
+        
+        #status { 
+            background: #fff3cd; color: #856404; padding: 12px; 
+            border-radius: 8px; text-align: center; margin-bottom: 15px; 
+            border: 1px solid #ffeeba; font-weight: bold;
+        }
+
+        .btn-group { display: flex; gap: 10px; margin-top: 10px; }
+        button { flex: 1; padding: 12px; border: none; border-radius: 6px; font-size: 16px; cursor: pointer; font-weight: 600; color: white; transition: 0.2s; }
+        .btn-blue { background: #007bff; }
+        .btn-green { background: #28a745; }
+        .btn-orange { background: #fd7e14; }
+        .btn-red { background: #dc3545; }
+        button:disabled { background: #adb5bd; cursor: not-allowed; }
+
+        input[type="file"] { width: 100%; margin-top: 5px; }
+        
+        #canvas-container { position: relative; width: 100%; border: 2px solid #dee2e6; overflow: hidden; background: #6c757d; touch-action: none; border-radius: 4px; min-height: 200px; display: flex; align-items: center; justify-content: center; color: white; }
+        canvas { width: 100%; height: auto; display: block; }
+        #select-box { position: absolute; border: 2px solid #ff0000; background: rgba(255, 0, 0, 0.2); display: none; }
+
+        #result-panel { display: none; margin-top: 20px; border-top: 2px dashed #ccc; padding-top: 20px; }
+        iframe { width: 100%; height: 400px; border: 1px solid #ccc; border-radius: 5px; background: #eee; }
+    </style>
+</head>
+<body>
+
+    <h3>🔓 Ultra HD Unlock & Crop</h3>
+    <div id="status">Checking memory...</div>
+
+    <div class="card">
+        <label><strong>1. Master PDF (Template):</strong></label>
+        <input type="file" id="fileIn" accept="application/pdf">
+        <button id="lockBtn" class="btn-blue" disabled>🔒 Lock & Process</button>
+        <button id="clearBtn" class="btn-red" style="display:none; margin-top:10px;" onclick="clearMemory()">❌ Clear Saved Template</button>
+        
+        <hr style="margin: 20px 0; border: 0.5px solid #eee;">
+        
+        <label><strong>2. Next PDF (Auto Crop + Unlock):</strong></label>
+        <input type="file" id="nextFileIn" accept="application/pdf" disabled>
+    </div>
+
+    <div id="canvas-container">
+        <canvas id="the-canvas" style="display:none;"></canvas>
+        <div id="placeholder-text">Preview will appear here</div>
+        <div id="select-box"></div>
+    </div>
+
+    <div class="card" id="result-panel">
+        <h4 style="text-align:center; margin-top:0;">✅ Ultra HD Output Ready</h4>
+        <iframe id="pdf-preview-frame"></iframe>
+
+        <div class="btn-group">
+            <button class="btn-green" onclick="downloadCurrentPDF()">⬇️ Download</button>
+            <button class="btn-orange" onclick="printCurrentPDF()">🖨️ Print Now</button>
+        </div>
+    </div>
+
+<script>
+    pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.16.105/pdf.worker.min.js';
+    const { PDFDocument } = PDFLib;
+
+    let pdfDocPreview = null, fileBuffer = null, canvas = document.getElementById('the-canvas'), ctx = canvas.getContext('2d');
+    let status = document.getElementById('status'), selectBox = document.getElementById('select-box');
+    let nextFileInput = document.getElementById('nextFileIn'), lockBtn = document.getElementById('lockBtn'), clearBtn = document.getElementById('clearBtn');
+    let resultPanel = document.getElementById('result-panel');
+    
+    let startX, startY, isDragging = false, viewRect = {}, pdfRect = null, currentPDFBytes = null;
+    let currentPassword = '';
+
+    // --- 1. Memory Check ---
+    window.onload = function() {
+        let savedData = localStorage.getItem('myCropRect');
+        if (savedData) {
+            pdfRect = JSON.parse(savedData);
+            status.innerText = "✅ Template Found! Upload Next PDF.";
+            status.style.background = "#d4edda"; status.style.color = "#155724";
+            nextFileInput.disabled = false; clearBtn.style.display = 'block';
+        } else {
+            status.innerText = "Upload Master PDF to set template.";
+        }
+    };
+
+    // --- 2. File Uploads ---
+    document.getElementById('fileIn').addEventListener('change', async (e) => {
+        handleFileUpload(e.target.files[0], true);
+    });
+
+    nextFileInput.addEventListener('change', async (e) => {
+        handleFileUpload(e.target.files[0], false);
+    });
+
+    async function handleFileUpload(file, isMaster) {
+        if(!file) return;
+        
+        if(isMaster) { resetUI(); lockBtn.disabled = true; }
+        else { status.innerText = "Processing Ultra HD... (Please Wait)"; resultPanel.style.display = 'none'; }
+
+        fileBuffer = await file.arrayBuffer();
+        let typedarray = new Uint8Array(fileBuffer);
+
+        try {
+            const loadingTask = pdfjsLib.getDocument(typedarray);
+            loadingTask.onPassword = (updatePassword, reason) => {
+                let pass = prompt("🔒 PDF Locked! Enter Password:");
+                if (pass) {
+                    currentPassword = pass.trim();
+                    updatePassword(currentPassword);
+                } else {
+                    alert("Password required!");
+                    status.innerText = "Password required.";
+                }
+            };
+            
+            pdfDocPreview = await loadingTask.promise;
+
+            if (isMaster) {
+                await renderPage(1);
+                status.innerText = "Select area & click Lock.";
+                lockBtn.disabled = true;
+            } else {
+                if(!pdfRect) return alert("Template missing!");
+                // Give UI time to update text before heavy processing
+                setTimeout(() => attemptUnlockAndCrop(), 100);
+            }
+
+        } catch (err) {
+            console.error(err);
+            if (err.name === 'PasswordException') alert("❌ Incorrect Password!");
+            else status.innerText = "Error loading PDF: " + err.message;
+        }
+    }
+
+    async function renderPage(num) {
+        let page = await pdfDocPreview.getPage(num);
+        let viewport = page.getViewport({scale: 1.5});
+        canvas.width = viewport.width; canvas.height = viewport.height;
+        canvas.style.display = 'block';
+        document.getElementById('placeholder-text').style.display = 'none';
+        await page.render({canvasContext: ctx, viewport: viewport}).promise;
+    }
+
+    // --- 3. Selection ---
+    let container = document.getElementById('canvas-container');
+    function getPos(e) {
+        let rect = canvas.getBoundingClientRect();
+        let clientX = e.changedTouches ? e.changedTouches[0].clientX : e.clientX;
+        let clientY = e.changedTouches ? e.changedTouches[0].clientY : e.clientY;
+        let scaleX = canvas.width / rect.width;
+        let scaleY = canvas.height / rect.height;
+        return { x: (clientX - rect.left) * scaleX, y: (clientY - rect.top) * scaleY };
+    }
+    container.addEventListener('mousedown', startDraw); container.addEventListener('touchstart', startDraw, {passive: false});
+    container.addEventListener('mousemove', moveDraw); container.addEventListener('touchmove', moveDraw, {passive: false});
+    container.addEventListener('mouseup', endDraw); container.addEventListener('touchend', endDraw);
+
+    function startDraw(e) {
+        if(pdfRect) return;
+        if(e.type === 'touchstart') document.body.style.overflow = "hidden";
+        isDragging = true;
+        let pos = getPos(e);
+        startX = pos.x; startY = pos.y;
+        selectBox.style.display = 'block';
+    }
+    function moveDraw(e) {
+        if(!isDragging) return;
+        e.preventDefault();
+        let pos = getPos(e);
+        let w = pos.x - startX, h = pos.y - startY;
+        let cssScaleX = canvas.getBoundingClientRect().width / canvas.width;
+        let cssScaleY = canvas.getBoundingClientRect().height / canvas.height;
+        selectBox.style.left = (w < 0 ? pos.x : startX) * cssScaleX + 'px';
+        selectBox.style.top = (h < 0 ? pos.y : startY) * cssScaleY + 'px';
+        selectBox.style.width = Math.abs(w) * cssScaleX + 'px';
+        selectBox.style.height = Math.abs(h) * cssScaleY + 'px';
+    }
+    function endDraw(e) {
+        if(!isDragging) return;
+        isDragging = false;
+        document.body.style.overflow = "auto";
+        let pos = getPos(e);
+        viewRect = { x: Math.min(startX, pos.x), y: Math.min(startY, pos.y), w: Math.abs(pos.x - startX), h: Math.abs(pos.y - startY) };
+        if(viewRect.w > 10) lockBtn.disabled = false;
+    }
+
+    // --- 4. Logic (ULTRA HD FIX) ---
+    lockBtn.addEventListener('click', async () => {
+        let page = await pdfDocPreview.getPage(1);
+        let viewport = page.getViewport({scale: 1.5}); 
+        let pdfPageWidth = (await page.getViewport({scale: 1.0})).width;
+        let pdfPageHeight = (await page.getViewport({scale: 1.0})).height;
+        
+        let scaleX = pdfPageWidth / canvas.width;
+        let scaleY = pdfPageHeight / canvas.height;
+
+        pdfRect = { 
+            x: viewRect.x * scaleX, 
+            y: pdfPageHeight - ((viewRect.y + viewRect.h) * scaleY), 
+            width: viewRect.w * scaleX, 
+            height: viewRect.h * scaleY 
+        };
+        
+        localStorage.setItem('myCropRect', JSON.stringify(pdfRect));
+        await attemptUnlockAndCrop();
+        
+        status.innerText = "✅ Template Locked!";
+        nextFileInput.disabled = false; lockBtn.disabled = true; clearBtn.style.display = 'block'; selectBox.style.borderColor = "green";
+    });
+
+    async function attemptUnlockAndCrop() {
+        try {
+            let pdfDoc;
+            if (currentPassword) {
+                pdfDoc = await PDFDocument.load(fileBuffer, { password: currentPassword });
+            } else {
+                pdfDoc = await PDFDocument.load(fileBuffer);
+            }
+            
+            const pages = pdfDoc.getPages();
+            const page = pages[0];
+            page.setCropBox(pdfRect.x, pdfRect.y, pdfRect.width, pdfRect.height);
+            page.setMediaBox(pdfRect.x, pdfRect.y, pdfRect.width, pdfRect.height);
+            
+            currentPDFBytes = await pdfDoc.save();
+            showResult();
+
+        } catch (e) {
+            console.log("Standard failed, switching to Ultra HD Image Mode...");
+            status.innerText = "⚠️ High-Res Generating... (Wait)";
+            await processViaImageFallback();
+        }
+    }
+
+    async function processViaImageFallback() {
+        try {
+            // QUALITY SETTING: 8.0 = Ultra Sharp (~600 DPI)
+            let page = await pdfDocPreview.getPage(1);
+            let scale = 8.0; 
+            let viewport = page.getViewport({scale: scale});
+            
+            let tempCanvas = document.createElement('canvas');
+            tempCanvas.width = viewport.width;
+            tempCanvas.height = viewport.height;
+            let tempCtx = tempCanvas.getContext('2d');
+            
+            await page.render({canvasContext: tempCtx, viewport: viewport}).promise;
+            
+            const pdfDoc = await PDFDocument.create();
+            const newPage = pdfDoc.addPage([viewport.width / scale, viewport.height / scale]);
+            
+            const pngImage = await pdfDoc.embedPng(tempCanvas.toDataURL('image/png'));
+            
+            newPage.drawImage(pngImage, {
+                x: 0,
+                y: 0,
+                width: viewport.width / scale,
+                height: viewport.height / scale,
+            });
+
+            newPage.setCropBox(pdfRect.x, pdfRect.y, pdfRect.width, pdfRect.height);
+            newPage.setMediaBox(pdfRect.x, pdfRect.y, pdfRect.width, pdfRect.height);
+            
+            currentPDFBytes = await pdfDoc.save();
+            
+            // Clean up memory
+            tempCanvas.width = 0; tempCanvas.height = 0; tempCanvas = null;
+
+            showResult();
+            status.innerText = "✅ Done! (Ultra HD Quality)";
+
+        } catch (err) {
+            alert("Error: " + err.message);
+            status.innerText = "Failed.";
+        }
+    }
+
+    function showResult() {
+        const blob = new Blob([currentPDFBytes], { type: 'application/pdf' });
+        const url = URL.createObjectURL(blob);
+        document.getElementById('pdf-preview-frame').src = url;
+        resultPanel.style.display = 'block';
+        resultPanel.scrollIntoView({ behavior: 'smooth' });
+    }
+
+    function downloadCurrentPDF() {
+        if(currentPDFBytes) download(currentPDFBytes, "Ultra_HD_Unlocked.pdf", "application/pdf");
+    }
+
+    function printCurrentPDF() {
+        if(!currentPDFBytes) return;
+        const blob = new Blob([currentPDFBytes], { type: 'application/pdf' });
+        const blobUrl = URL.createObjectURL(blob);
+        try {
+            printJS({printable: blobUrl, type: 'pdf', showModal: true});
+        } catch (e) {
+            window.open(blobUrl, '_blank');
+        }
+    }
+    
+    function resetUI() {
+        pdfRect = null; localStorage.removeItem('myCropRect'); currentPassword = '';
+        nextFileInput.disabled = true; clearBtn.style.display = 'none'; resultPanel.style.display = 'none';
+        status.innerText = "Loading..."; status.style.background = "#fff3cd"; status.style.color = "#856404";
+    }
+    function clearMemory() { resetUI(); location.reload(); }
+
+</script>
+</body>
+</html>
